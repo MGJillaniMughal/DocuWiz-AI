@@ -1,0 +1,13 @@
+streamlit
+PyPDF2
+langchain
+openai
+python-docx
+python-pptx
+pandas
+numpy
+matplotlib
+seaborn
+scipy
+reportlab
+openpyxl

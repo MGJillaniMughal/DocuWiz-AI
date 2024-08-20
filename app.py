@@ -13,8 +13,7 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
-from transformers import pipeline
-from transformers import BartForConditionalGeneration, BartTokenizer
+from transformers import pipeline, BartTokenizer, BartForConditionalGeneration
 from scipy.cluster import hierarchy
 import openpyxl
 
@@ -35,7 +34,7 @@ def extract_person_name(query):
             return words[i + 1]
     return None
 
-def summarize_text(summarizer, text, max_chunk_length=1000):
+def summarize_text(summarizer, text, max_chunk_length=512):
     """Summarize the provided text using the given summarizer model."""
     text_splitter = CharacterTextSplitter(
         separator="\n",
@@ -49,6 +48,31 @@ def summarize_text(summarizer, text, max_chunk_length=1000):
         summary = summarizer(chunk, max_length=250, min_length=30, do_sample=False)
         summaries.append(summary[0]['summary_text'])
     return "\n".join(summaries)
+
+def generate_quiz(quiz_generator, text, max_chunk_length=512):
+    """Generate quiz questions from the provided text using a text2text-generation model."""
+    text_splitter = CharacterTextSplitter(
+        separator="\n",
+        chunk_size=max_chunk_length,
+        chunk_overlap=200,
+        length_function=len
+    )
+    chunks = text_splitter.split_text(text)
+    quizzes = []
+    for chunk in chunks:
+        input_text = f"generate question: {chunk}"
+        quiz = quiz_generator(input_text, max_length=50, num_return_sequences=1)
+        quizzes.append(quiz)
+    return quizzes
+
+def translate_text(translator, text, max_length=400):
+    """Translate the provided text to the target language using the given translator model."""
+    chunks = [text[i:i + max_length] for i in range(0, len(text), max_length)]
+    translations = []
+    for chunk in chunks:
+        translated = translator(chunk, max_length=max_length)
+        translations.append(translated[0]['translation_text'])
+    return " ".join(translations)
 
 def main():
     load_dotenv()
@@ -110,13 +134,14 @@ def main():
             
             if text:
                 tokenizer = BartTokenizer.from_pretrained("facebook/bart-large-cnn")
+                max_token_length = 512
                 tokens = tokenizer.tokenize(text)
-                if len(tokens) > 1024:  # Adjust based on model's max input length
-                    text = tokenizer.convert_tokens_to_string(tokens[:1024])  # Truncate
+                if len(tokens) > max_token_length:  # Adjust based on model's max input length
+                    text = tokenizer.convert_tokens_to_string(tokens[:max_token_length])  # Truncate
 
                 text_splitter = CharacterTextSplitter(
                     separator="\n",
-                    chunk_size=1000,
+                    chunk_size=max_token_length,
                     chunk_overlap=200,
                     length_function=len
                 )
@@ -137,14 +162,23 @@ def main():
                     st.write(response)
 
                 # Initialize NLP pipelines
-                summarizer = pipeline("summarization", model="facebook/bart-large-cnn")
+                summarizer = pipeline("summarization", model="facebook/bart-large-cnn") 
                 sentiment_analyzer = pipeline("sentiment-analysis", model="distilbert-base-uncased-finetuned-sst-2-english")
                 topic_modeler = pipeline("zero-shot-classification", model="facebook/bart-large-mnli")
+                quiz_generator = pipeline("text2text-generation", model="valhalla/t5-small-e2e-qg")
+                translator_models = {
+                    "ur": "Helsinki-NLP/opus-mt-en-ur",
+                    "fr": "Helsinki-NLP/opus-mt-en-fr",
+                    "es": "Helsinki-NLP/opus-mt-en-es",
+                    "de": "Helsinki-NLP/opus-mt-en-de",
+                    "it": "Helsinki-NLP/opus-mt-en-it",
+                    "zh": "Helsinki-NLP/opus-mt-en-zh"
+                }
 
                 if st.button("Summarize Document"):
                     try:
                         if len(text.strip()) == 0:
-                            st.write("The document is too short or empty.")
+                            st.write("The document is too short or empty.") 
                         else:
                             summary = summarize_text(summarizer, text)
                             st.write(summary)
@@ -165,6 +199,27 @@ def main():
                         labels = ["Politics", "Economics", "Sports", "Technology", "Health", "Entertainment", "Education"]
                         topics = topic_modeler(text, candidate_labels=labels)
                         st.write(f"Main Topic: {topics['labels'][0]} (Score: {topics['scores'][0]})")
+
+                # Adding translation feature
+                target_lang = st.selectbox("Select target language", ["ur","fr", "es", "de", "it", "zh"])
+                if target_lang and st.button("Translate Document"):
+                    translator_model = translator_models[target_lang]
+                    translator = pipeline("translation", model=translator_model)
+                    try:
+                        translation = translate_text(translator, text)
+                        st.write(translation)
+                    except Exception as e:
+                        st.error(f"Error during translation: {str(e)}")
+
+                # Adding quiz generation feature
+                if st.button("Generate Quiz"):
+                    try:
+                        quizzes = generate_quiz(quiz_generator, text)
+                        for i, quiz in enumerate(quizzes):
+                            st.write(f"Question {i+1}: {quiz[0]['generated_text']}")
+                    except Exception as e:
+                        st.error(f"Error during quiz generation: {str(e)}")
+
             else:
                 st.warning("Unsupported file type. Please upload a PDF, DOCX, TXT, PPTX, XLSX, or CSV file.")
             
@@ -207,7 +262,7 @@ def extract_text_from_file(uploaded_file):
         text = ""
         for slide in ppt.slides:
             for shape in slide.shapes:
-                if hasattr(shape, 'text'):
+                if hasattr(shape, 'text'):  
                     text += shape.text + "\n"
         return text
     return None

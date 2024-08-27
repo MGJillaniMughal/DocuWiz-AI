@@ -1,7 +1,6 @@
 from dotenv import load_dotenv
 import streamlit as st
 from PyPDF2 import PdfReader
-from langchain.text_splitter import CharacterTextSplitter
 from langchain.embeddings.openai import OpenAIEmbeddings
 from langchain.vectorstores import FAISS
 from langchain.chains.question_answering import load_qa_chain
@@ -16,6 +15,8 @@ import seaborn as sns
 from transformers import pipeline, BartTokenizer, BartForConditionalGeneration
 from scipy.cluster import hierarchy
 import openpyxl
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_community.chat_models import ChatOpenAI
 
 def extract_column_name(prompt):
     """Extract column name from a given prompt."""
@@ -36,8 +37,7 @@ def extract_person_name(query):
 
 def summarize_text(summarizer, text, max_chunk_length=512):
     """Summarize the provided text using the given summarizer model."""
-    text_splitter = CharacterTextSplitter(
-        separator="\n",
+    text_splitter = RecursiveCharacterTextSplitter(
         chunk_size=max_chunk_length,
         chunk_overlap=200,
         length_function=len
@@ -45,14 +45,15 @@ def summarize_text(summarizer, text, max_chunk_length=512):
     chunks = text_splitter.split_text(text)
     summaries = []
     for chunk in chunks:
-        summary = summarizer(chunk, max_length=250, min_length=30, do_sample=False)
+        chunk_length = len(chunk.split())
+        max_length = min(250, max(chunk_length // 2, 50))  # Adjust max_length based on chunk size
+        summary = summarizer(chunk, max_length=max_length, min_length=30, do_sample=False)
         summaries.append(summary[0]['summary_text'])
     return "\n".join(summaries)
 
 def generate_quiz(quiz_generator, text, max_chunk_length=512):
     """Generate quiz questions from the provided text using a text2text-generation model."""
-    text_splitter = CharacterTextSplitter(
-        separator="\n",
+    text_splitter = RecursiveCharacterTextSplitter(
         chunk_size=max_chunk_length,
         chunk_overlap=200,
         length_function=len
@@ -127,34 +128,35 @@ def main():
         st.markdown("<h3 class='sub-header'>Empowering Document Intelligence with AI</h3>", unsafe_allow_html=True)
         st.markdown("**This application is powered by Jillani SoftTech 😎**")
 
-        uploaded_file = st.file_uploader("Upload your document", type=["pdf", "docx", "txt", "pptx", "csv", "xlsx"], key="file_uploader")
+        uploaded_file = st.file_uploader("Upload your document", type=["pdf", "docx", "txt", "pptx", "csv", "xlsx"], key="file_uploader", help="Supported file types: PDF, DOCX, TXT, PPTX, CSV, XLSX", accept_multiple_files=False)
 
         if uploaded_file is not None:
             text = extract_text_from_file(uploaded_file)
             
             if text:
-                tokenizer = BartTokenizer.from_pretrained("facebook/bart-large-cnn")
-                max_token_length = 512
+                model = BartForConditionalGeneration.from_pretrained("facebook/bart-large", forced_bos_token_id=0)
+                #tok = BartTokenizer.from_pretrained("facebook/bart-large")
+                tokenizer = BartTokenizer.from_pretrained("facebook/bart-large")
+                max_token_length = 1024  # Increased to allow longer inputs
                 tokens = tokenizer.tokenize(text)
-                if len(tokens) > max_token_length:  # Adjust based on model's max input length
-                    text = tokenizer.convert_tokens_to_string(tokens[:max_token_length])  # Truncate
+                if len(tokens) > max_token_length:
+                    text = tokenizer.convert_tokens_to_string(tokens[:max_token_length])
 
-                text_splitter = CharacterTextSplitter(
-                    separator="\n",
+                text_splitter = RecursiveCharacterTextSplitter(
                     chunk_size=max_token_length,
                     chunk_overlap=200,
                     length_function=len
                 )
                 chunks = text_splitter.split_text(text)
 
-                embeddings = OpenAIEmbeddings()
+                embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
                 knowledge_base = FAISS.from_texts(chunks, embedding=embeddings)
 
                 user_question = st.text_input("Ask a question about your document:")
                 if user_question:
                     docs = knowledge_base.similarity_search(user_question)
 
-                    llm = OpenAI()
+                    llm = ChatOpenAI(model_name="gpt-4o", temperature=0.2,max_tokens=1000)
                     chain = load_qa_chain(llm, chain_type="stuff")
                     with get_openai_callback() as cb:
                         response = chain.run(input_documents=docs, question=user_question)
@@ -246,145 +248,154 @@ def main():
 
 def extract_text_from_file(uploaded_file):
     """Extract text from different file types."""
-    if uploaded_file.type == 'application/pdf':
-        pdf_reader = PdfReader(uploaded_file)
-        text = ""
-        for page in pdf_reader.pages:
-            text += page.extract_text()
-        return text
-    elif uploaded_file.type == 'application/vnd.openxmlformats-officedocument.wordprocessingml.document':
-        doc = Document(uploaded_file)
-        return "\n".join([para.text for para in doc.paragraphs])
-    elif uploaded_file.type == 'text/plain':
-        return uploaded_file.read().decode('utf-8')
-    elif uploaded_file.type == 'application/vnd.openxmlformats-officedocument.presentationml.presentation':
-        ppt = Presentation(uploaded_file)
-        text = ""
-        for slide in ppt.slides:
-            for shape in slide.shapes:
-                if hasattr(shape, 'text'):  
-                    text += shape.text + "\n"
-        return text
+    try:
+        if uploaded_file.type == 'application/pdf':
+            pdf_reader = PdfReader(uploaded_file)
+            text = ""
+            for page in pdf_reader.pages:
+                text += page.extract_text()
+            return text
+        elif uploaded_file.type == 'application/vnd.openxmlformats-officedocument.wordprocessingml.document':
+            doc = Document(uploaded_file)
+            return "\n".join([para.text for para in doc.paragraphs])
+        elif uploaded_file.type == 'text/plain':
+            return uploaded_file.read().decode('utf-8')
+        elif uploaded_file.type == 'application/vnd.openxmlformats-officedocument.presentationml.presentation':
+            ppt = Presentation(uploaded_file)
+            text = ""
+            for slide in ppt.slides:
+                for shape in slide.shapes:
+                    if hasattr(shape, 'text'):  
+                        text += shape.text + "\n"
+            return text
+    except Exception as e:
+        st.error(f"Error extracting text: {str(e)}")
     return None
 
 def handle_csv_excel_files(uploaded_file):
     """Handle CSV and Excel file uploads with data analysis features."""
     if uploaded_file is not None:
-        if uploaded_file.type == 'text/csv':
-            df = pd.read_csv(uploaded_file)
-            st.write("Uploaded CSV Data:")
-            st.write(df)
+        try:
+            if uploaded_file.type == 'text/csv':
+                df = pd.read_csv(uploaded_file)
+                st.write("Uploaded CSV Data:")
+                st.write(df)
 
-            prompt = st.text_input("Enter a data science analysis prompt:")
+                prompt = st.text_input("Enter a data science analysis prompt:")
 
-            if prompt:
-                st.write("Analysis Result:")
-                prompt_lower = prompt.lower()
-                column = extract_column_name(prompt)
-                if column is not None:
-                    perform_data_analysis(df, column, prompt_lower)
-                else:
-                    st.write("Column not specified in the prompt.")
-            return
-        elif uploaded_file.type == 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet':
-            df = pd.read_excel(uploaded_file, engine="openpyxl")
-            st.write("Uploaded Excel Data:")
-            st.write(df)
+                if prompt:
+                    st.write("Analysis Result:")
+                    prompt_lower = prompt.lower()
+                    column = extract_column_name(prompt)
+                    if column is not None:
+                        perform_data_analysis(df, column, prompt_lower)
+                    else:
+                        st.write("Column not specified in the prompt.")
+                return
+            elif uploaded_file.type == 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet':
+                df = pd.read_excel(uploaded_file, engine="openpyxl")
+                st.write("Uploaded Excel Data:")
+                st.write(df)
 
-            user_prompt = st.text_input("Enter a prompt for Excel analysis:")
+                user_prompt = st.text_input("Enter a prompt for Excel analysis:")
 
-            if user_prompt:
-                st.write("Excel Analysis Result:")
-                user_prompt_lower = user_prompt.lower()
-                column = extract_column_name(user_prompt)
-                if column is not None:
-                    perform_data_analysis(df, column, user_prompt_lower)
-                else:
-                    st.write("Column not specified in the prompt.")
-            return
+                if user_prompt:
+                    st.write("Excel Analysis Result:")
+                    user_prompt_lower = user_prompt.lower()
+                    column = extract_column_name(user_prompt)
+                    if column is not None:
+                        perform_data_analysis(df, column, user_prompt_lower)
+                    else:
+                        st.write("Column not specified in the prompt.")
+                return
+        except Exception as e:
+            st.error(f"Error processing file: {str(e)}")
 
 def perform_data_analysis(df, column, prompt_lower):
     """Perform various data analysis tasks based on the user prompt."""
-    if "mean" in prompt_lower or "average" in prompt_lower:
-        st.write(f"Mean of '{column}': {df[column].mean()}")
+    try:
+        if "mean" in prompt_lower or "average" in prompt_lower:
+            st.write(f"Mean of '{column}': {df[column].mean()}")
 
-    elif "median" in prompt_lower:
-        st.write(f"Median of '{column}': {df[column].median()}")
+        elif "median" in prompt_lower:
+            st.write(f"Median of '{column}': {df[column].median()}")
 
-    elif "mode" in prompt_lower:
-        mode_values = df[column].mode()
-        if not mode_values.empty:
-            st.write(f"Mode of '{column}': {', '.join(map(str, mode_values))}")
+        elif "mode" in prompt_lower:
+            mode_values = df[column].mode()
+            if not mode_values.empty:
+                st.write(f"Mode of '{column}': {', '.join(map(str, mode_values))}")
+            else:
+                st.write(f"No mode found in '{column}'.")
+
+        elif "histogram" in prompt_lower:
+            plt.hist(df[column], bins=20)
+            st.pyplot(plt)
+
+        elif "scatterplot" in prompt_lower:
+            x_column = st.selectbox("Select the X-axis column:", df.columns)
+            plt.scatter(df[x_column], df[column])
+            st.pyplot(plt)
+
+        elif "count" in prompt_lower:
+            st.write(f"Count of '{column}': {df[column].count()}")
+
+        elif "sum" in prompt_lower:
+            st.write(f"Sum of '{column}': {df[column].sum()}")
+
+        elif "null" in prompt_lower:
+            st.write(f"Null value count in '{column}': {df[column].isnull().sum()}")
+
+        elif "min" in prompt_lower:
+            st.write(f"Min value in '{column}': {df[column].min()}")
+
+        elif "max" in prompt_lower:
+            st.write(f"Max value in '{column}': {df[column].max()}")
+
+        elif "line plot" in prompt_lower:
+            x_column = st.selectbox("Select the X-axis column:", df.columns)
+            y_column = st.selectbox("Select the Y-axis column:", df.columns)
+            plt.plot(df[x_column], df[y_column])
+            st.pyplot(plt)
+
+        elif "scatter chart" in prompt_lower:
+            x_column = st.selectbox("Select the X-axis column:", df.columns)
+            y_column = st.selectbox("Select the Y-axis column:", df.columns)
+            plt.scatter(df[x_column], df[y_column])
+            st.pyplot(plt)
+
+        elif "correlation chart" in prompt_lower:
+            corr_matrix = df.corr()
+            sns.heatmap(corr_matrix, annot=True)
+            st.pyplot(plt)
+
+        elif "heatmap" in prompt_lower:
+            sns.heatmap(df.corr(), annot=True, cmap="coolwarm")
+            st.pyplot(plt)
+
+        elif "bubble chart" in prompt_lower:
+            x_column = st.selectbox("Select the X-axis column:", df.columns)
+            y_column = st.selectbox("Select the Y-axis column:", df.columns)
+            size_column = st.selectbox("Select the size column:", df.columns)
+            plt.scatter(df[x_column], df[y_column], s=df[size_column])
+            st.pyplot(plt)
+
+        elif "radar chart" in prompt_lower:
+            st.write("Radar chart not implemented yet.")
+
+        elif "ridge plot" in prompt_lower:
+            sns.violinplot(df[column])
+            st.pyplot(plt)
+
+        elif "dendrogram" in prompt_lower:
+            corr_matrix = df.corr()
+            linkage_matrix = hierarchy.linkage(corr_matrix, method='ward')
+            dendrogram = hierarchy.dendrogram(linkage_matrix, labels=corr_matrix.index)
+            st.pyplot(plt)
+
         else:
-            st.write(f"No mode found in '{column}'.")
-
-    elif "histogram" in prompt_lower:
-        plt.hist(df[column], bins=20)
-        st.pyplot(plt)
-
-    elif "scatterplot" in prompt_lower:
-        x_column = st.selectbox("Select the X-axis column:", df.columns)
-        plt.scatter(df[x_column], df[column])
-        st.pyplot(plt)
-
-    elif "count" in prompt_lower:
-        st.write(f"Count of '{column}': {df[column].count()}")
-
-    elif "sum" in prompt_lower:
-        st.write(f"Sum of '{column}': {df[column].sum()}")
-
-    elif "null" in prompt_lower:
-        st.write(f"Null value count in '{column}': {df[column].isnull().sum()}")
-
-    elif "min" in prompt_lower:
-        st.write(f"Min value in '{column}': {df[column].min()}")
-
-    elif "max" in prompt_lower:
-        st.write(f"Max value in '{column}': {df[column].max()}")
-
-    elif "line plot" in prompt_lower:
-        x_column = st.selectbox("Select the X-axis column:", df.columns)
-        y_column = st.selectbox("Select the Y-axis column:", df.columns)
-        plt.plot(df[x_column], df[y_column])
-        st.pyplot(plt)
-
-    elif "scatter chart" in prompt_lower:
-        x_column = st.selectbox("Select the X-axis column:", df.columns)
-        y_column = st.selectbox("Select the Y-axis column:", df.columns)
-        plt.scatter(df[x_column], df[y_column])
-        st.pyplot(plt)
-
-    elif "correlation chart" in prompt_lower:
-        corr_matrix = df.corr()
-        sns.heatmap(corr_matrix, annot=True)
-        st.pyplot(plt)
-
-    elif "heatmap" in prompt_lower:
-        sns.heatmap(df.corr(), annot=True, cmap="coolwarm")
-        st.pyplot(plt)
-
-    elif "bubble chart" in prompt_lower:
-        x_column = st.selectbox("Select the X-axis column:", df.columns)
-        y_column = st.selectbox("Select the Y-axis column:", df.columns)
-        size_column = st.selectbox("Select the size column:", df.columns)
-        plt.scatter(df[x_column], df[y_column], s=df[size_column])
-        st.pyplot(plt)
-
-    elif "radar chart" in prompt_lower:
-        st.write("Radar chart not implemented yet.")
-
-    elif "ridge plot" in prompt_lower:
-        sns.violinplot(df[column])
-        st.pyplot(plt)
-
-    elif "dendrogram" in prompt_lower:
-        corr_matrix = df.corr()
-        linkage_matrix = hierarchy.linkage(corr_matrix, method='ward')
-        dendrogram = hierarchy.dendrogram(linkage_matrix, labels=corr_matrix.index)
-        st.pyplot(plt)
-
-    else:
-        st.write("Unsupported analysis prompt.")
+            st.write("Unsupported analysis prompt.")
+    except Exception as e:
+        st.error(f"Error during data analysis: {str(e)}")
 
 if __name__ == '__main__':
     main()
